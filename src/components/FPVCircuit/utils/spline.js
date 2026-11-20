@@ -22,7 +22,7 @@ export const generateDeterministicSpline = (achievements, year, startPos = new T
 
   const segmentLength = 50;
   
-  achievements.forEach((achievement, index) => {
+  achievements.forEach(() => {
     // Generate a sequence of points for each achievement
     const numPointsPerSegment = 3;
     for (let i = 0; i < numPointsPerSegment; i++) {

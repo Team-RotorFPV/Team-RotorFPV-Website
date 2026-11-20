@@ -1,6 +1,6 @@
 import React from 'react';
 import * as THREE from 'three';
-import { Torus, Cone } from '@react-three/drei';
+import { Cone } from '@react-three/drei';
 
 import { NeonRing } from '../effects/NeonRing';
 

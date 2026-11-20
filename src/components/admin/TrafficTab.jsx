@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { fetchAnalytics } from '../../lib/adminApi';
+import useAsyncData from '../../hooks/useAsyncData';
 
 // ISO-2 country code -> string. (Emojis removed per request)
 const formatCountryCode = (cc) => {
@@ -36,30 +37,13 @@ const formatTime = (iso) => {
 };
 
 const TrafficTab = () => {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setData(await fetchAnalytics());
-    } catch (err) {
-      setError(err.message || 'Failed to load analytics');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const { data, loading, error: loadError, reload: load } = useAsyncData(fetchAnalytics);
+  const error = loadError ? (loadError.message || 'Failed to load analytics') : '';
 
   const stats = data
     ? [
         { label: 'Total Page Views', value: data.totalVisits },
-        { label: 'Unique Visitors', value: data.uniqueVisitors, hint: 'by IP' },
+        { label: 'Unique Visitors', value: data.uniqueVisitors, hint: 'anonymised' },
         { label: 'Last 24 Hours', value: data.last24h },
         { label: 'Last 7 Days', value: data.last7d },
       ]
@@ -135,13 +119,13 @@ const TrafficTab = () => {
                         <tr>
                           <th>When</th>
                           <th>Location</th>
-                          <th>IP</th>
+                          <th>Visitor</th>
                           <th>Page</th>
                         </tr>
                       </thead>
                       <tbody>
                         {data.recent.map((v, i) => (
-                          <tr key={`${v.ip}-${v.timestamp}-${i}`}>
+                          <tr key={`${v.visitor}-${v.timestamp}-${i}`}>
                             <td>{formatTime(v.timestamp)}</td>
                             <td>
                               <span className="visit-flag">{formatCountryCode(v.country)}</span>
@@ -150,7 +134,7 @@ const TrafficTab = () => {
                                 .filter((x) => x !== 'Unknown')
                                 .join(', ') || 'Unknown'}
                             </td>
-                            <td className="visit-ip">{v.ip || '—'}</td>
+                            <td className="visit-ip" title="Anonymised visitor ID (a keyed hash of the IP)">{v.visitor ? v.visitor.slice(0, 8) : '—'}</td>
                             <td className="visit-path">{v.path}</td>
                           </tr>
                         ))}

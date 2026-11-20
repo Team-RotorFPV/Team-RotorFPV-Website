@@ -1,6 +1,5 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -13,8 +12,8 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase
-const app = initializeApp(firebaseConfig);
+export const app = initializeApp(firebaseConfig);
 
-// Initialize Firestore and Auth
+// Firestore only. Auth lives in firebaseAuth.js so public pages, which never
+// sign anyone in, don't download the Auth SDK.
 export const db = getFirestore(app);
-export const auth = getAuth(app);

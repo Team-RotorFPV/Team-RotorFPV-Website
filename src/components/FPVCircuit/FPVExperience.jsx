@@ -1,5 +1,4 @@
 import React, { useMemo, useEffect, useState } from 'react';
-import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import { generateContinuousTrack } from './track/TrackGenerator';
 import { YearCircuit } from './track/YearCircuit';
@@ -12,7 +11,7 @@ import { detectWebGLSupport } from './utils/webglSupport';
 import { FPVErrorBoundary } from './FPVErrorBoundary';
 import { FPVUnsupported } from './FPVUnsupported';
 
-const CircuitScene = ({ progress, continuousTrackData, isMobile, flyToNextGate, autoFly, pauseFlight }) => {
+const CircuitScene = ({ progress, continuousTrackData, isMobile, flyToNextGate, autoFly }) => {
   return (
     <>
       <fog attach="fog" args={['#050608', 500, 20000]} />

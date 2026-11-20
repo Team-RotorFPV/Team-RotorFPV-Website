@@ -16,8 +16,13 @@ import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import dotenv from 'dotenv';
-import { getClientIp, getPublicIdFromUrl, verifyAdmin, verifySuperAdmin, verifyAuth } from './auth.js';
-import { sendVerificationEmail, verifyToken } from './verificationService.js';
+import { getClientIp, getPublicIdFromUrl, verifyAdmin, verifySuperAdmin, verifyAuth, requireActiveMember, updateRoleClaims } from './auth.js';
+import { sendVerificationEmail } from './verificationService.js';
+import { createVerifyRouter } from './verifyFlow.js';
+import { buildAuditEntry, fetchAuditLogs } from './auditLog.js';
+import { visitorHashSecret, visitorId, visitExpiry } from './visitPrivacy.js';
+import { InputError, parseEmail, parseApproveRequest, parseCreateMember } from './memberInput.js';
+import { sanitizeFolder, normalizeMoveFolder, parseCloudinaryUrl, optimizedDeliveryUrl } from './cloudinaryAssets.js';
 
 dotenv.config();
 
@@ -44,8 +49,9 @@ const db = getFirestore();
 const app = express();
 
 // Behind a reverse proxy, the real client IP arrives in the X-Forwarded-For
-// header — the raw socket address is the proxy's. Trust the chain so Express
-// parses XFF; we then extract the IP ourselves via getClientIp() below.
+// header — the raw socket address is the proxy's. Express's own req.ip would
+// take the LEFTMOST (client-forgeable) entry, so never use req.ip for anything
+// security-relevant: always resolve the visitor with getClientIp().
 app.set('trust proxy', true);
 
 // Security headers. CSP is left off because this server only returns JSON (a CSP
@@ -76,7 +82,7 @@ const isTrustedSubdomain = (origin) =>
 // Set VERCEL_PROJECT_NAME in server/.env to your Vercel project slug (e.g. "team-rotor-fpv-website").
 const VERCEL_PROJECT_NAME = process.env.VERCEL_PROJECT_NAME || '';
 
-app.use(cors({
+const corsMiddleware = cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (server-to-server, curl, Postman)
     if (!origin) {
@@ -100,7 +106,12 @@ app.use(cors({
 
     callback(new Error('Not allowed by CORS'));
   }
-}));
+});
+
+// /api/verify is opened from an email and its Confirm button posts a form from
+// the API's own domain. That is a normal page visit, not a cross-origin API
+// call, so CORS doesn't apply (and the allowlist would wrongly reject it).
+app.use((req, res, next) => (req.path === '/api/verify' ? next() : corsMiddleware(req, res, next)));
 
 app.use(express.json());
 
@@ -199,12 +210,9 @@ const logAudit = async (action, userEmail, targetEmail) => {
   const logMessage = `[ROLE CHANGE] ${userEmail} ${action} ${targetEmail}`;
   console.log(logMessage);
   try {
-    await db.collection('audit_logs').add({
-      action,
-      userEmail,
-      targetEmail,
-      timestamp: new Date()
-    });
+    await db.collection('audit_logs').add(
+      buildAuditEntry({ category: 'role_change', action, actor: userEmail, target: targetEmail })
+    );
   } catch (e) {
     console.error("Failed to write audit log:", e);
   }
@@ -226,7 +234,7 @@ app.post('/api/setAdmin', verifySuperAdmin, async (req, res) => {
     }
 
     const isSuper = userRecord.customClaims?.superAdmin === true;
-    await getAuth().setCustomUserClaims(userRecord.uid, { admin: true, superAdmin: isSuper });
+    await updateRoleClaims(getAuth(), userRecord, { admin: true, superAdmin: isSuper });
     await db.collection('admins').doc(email).set({ email, isSuperAdmin: isSuper, isRoot: email === process.env.SUPER_ADMIN_EMAIL }, { merge: true });
     await logAudit('granted admin to', req.user.email, email);
     res.json({ message: `Successfully granted admin privileges to ${email}` });
@@ -268,7 +276,7 @@ app.post('/api/removeAdmin', verifySuperAdmin, async (req, res) => {
       }
     }
 
-    await getAuth().setCustomUserClaims(userRecord.uid, { admin: false, superAdmin: false });
+    await updateRoleClaims(getAuth(), userRecord, { admin: false, superAdmin: false });
     await getAuth().revokeRefreshTokens(userRecord.uid);
     await db.collection('admins').doc(email).delete();
     await logAudit('revoked admin from', req.user.email, email);
@@ -294,7 +302,7 @@ app.post('/api/setSuperAdmin', verifySuperAdmin, async (req, res) => {
       } else throw err;
     }
     
-    await getAuth().setCustomUserClaims(userRecord.uid, { admin: true, superAdmin: true });
+    await updateRoleClaims(getAuth(), userRecord, { admin: true, superAdmin: true });
     await db.collection('admins').doc(email).set({ email, isSuperAdmin: true, isRoot: email === process.env.SUPER_ADMIN_EMAIL }, { merge: true });
     await logAudit('promoted to super admin', req.user.email, email);
     res.json({ message: `Successfully promoted ${email} to Super Admin` });
@@ -334,7 +342,7 @@ app.post('/api/removeSuperAdmin', verifySuperAdmin, async (req, res) => {
       } else throw err;
     }
 
-    await getAuth().setCustomUserClaims(userRecord.uid, { admin: true, superAdmin: false });
+    await updateRoleClaims(getAuth(), userRecord, { admin: true, superAdmin: false });
     await getAuth().revokeRefreshTokens(userRecord.uid);
     await db.collection('admins').doc(email).set({ isSuperAdmin: false }, { merge: true });
     await logAudit('demoted from super admin', req.user.email, email);
@@ -383,38 +391,38 @@ app.get('/api/admins', verifyAdmin, async (req, res) => {
   }
 });
 
-// ── Upload rate limiter: 20 uploads per 10 minutes per IP ──
+// ── Upload rate limiter: 20 uploads per 10 minutes per account ──
 // This caps memory pressure from concurrent large-file uploads.
 // Placed before Multer so rate-limited requests are rejected before
-// any file bytes are buffered into RAM.
+// any file bytes are buffered into RAM. Every upload route authenticates
+// first, so the limit follows the signed-in account (uid) rather than the
+// IP: a member can't dodge it by switching networks, and teammates sharing
+// one campus IP don't use up each other's allowance.
 const uploadLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
   max: 20,
   message: { error: 'Too many uploads. Please wait before uploading more files.' },
   standardHeaders: true,
   legacyHeaders: false,
-  // Key on the real visitor IP (parsed from the forwarded chain), not req.ip.
-  keyGenerator: (req) => ipKeyGenerator(getClientIp(req)),
+  keyGenerator: (req) => (req.user?.uid ? `uid:${req.user.uid}` : ipKeyGenerator(getClientIp(req))),
 });
 
-// ── Cloudinary folder naming ──────────────────────────────────────────────
-// Cloudinary folder segments are restricted, so caller-supplied folders are
-// stripped down to [a-zA-Z0-9/_-]. Anything deriving a folder from user data
-// MUST go through these two helpers, on both the client and the server, or the
-// ownership check below compares two differently-normalised strings.
-//
-// Keep in sync with sanitizeFolder()/ownProfileFolder() in the mobile app
-// (App/src/lib/mediaUpload.js).
-const sanitizeFolder = (folder) =>
-  (folder || '').replace(/[^a-zA-Z0-9/_-]/g, '');
+// Only admins and active team members may upload (see requireActiveMember).
+const requireUploader = requireActiveMember(async (email) => {
+  const snap = await db.collection('users').doc(email).get();
+  return snap.exists ? snap.data() : null;
+});
 
+// ── Cloudinary folder naming: see sanitizeFolder() in cloudinaryAssets.js ──
 // An email's '@' and '.' do not survive sanitisation, so the folder is derived
 // from the sanitised email rather than the raw one.
 const ownProfileFolder = (email) =>
   `users/${sanitizeFolder((email || '').toLowerCase())}`;
 
-// ── Image upload endpoint (authenticated, signed Cloudinary upload) ──
-app.post('/api/upload', verifyAuth, uploadLimiter, upload.single('image'), async (req, res) => {
+// ── Image upload endpoint (admins + active team members, signed Cloudinary upload) ──
+// Order matters: auth and membership are checked before the limiter and Multer,
+// so outsiders are rejected before any file bytes are buffered.
+app.post('/api/upload', verifyAuth, requireUploader, uploadLimiter, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -454,21 +462,10 @@ app.post('/api/upload', verifyAuth, uploadLimiter, upload.single('image'), async
       stream.end(req.file.buffer);
     });
 
-    let optimizedUrl = result.secure_url;
-    
-    // Cloudinary returns the resource_type it detected.
-    if (result.resource_type === 'video') {
-      // For videos: apply f_auto and q_auto:eco (to save massive bandwidth)
-      const parts = result.secure_url.split('/upload/');
-      optimizedUrl = `${parts[0]}/upload/f_auto,q_auto:eco/${parts[1]}`;
-    } else if (result.resource_type === 'image') {
-      // For images: handle format (e.g., HEIC -> WebP), quality, and resize to max width 1200px
-      const parts = result.secure_url.split('/upload/');
-      optimizedUrl = `${parts[0]}/upload/c_limit,w_1200,f_auto,q_auto/${parts[1]}`;
-    }
-
     res.json({
-      secure_url: optimizedUrl,
+      // Cloudinary reports the resource_type it detected; images get resized
+      // and auto-formatted (HEIC -> WebP etc.), videos get eco quality.
+      secure_url: optimizedDeliveryUrl(result),
       width: result.width,
       height: result.height,
       public_id: result.public_id,
@@ -476,7 +473,7 @@ app.post('/api/upload', verifyAuth, uploadLimiter, upload.single('image'), async
     });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: error.message || 'Upload failed' });
+    res.status(500).json({ error: 'Upload failed' });
   }
 });
 
@@ -516,7 +513,7 @@ app.post('/api/delete-asset', verifyAdmin, async (req, res) => {
     res.json({ message: 'Asset deletion processed', result: result.result, publicId });
   } catch (error) {
     console.error('[Cloudinary Delete] Error:', error);
-    res.status(500).json({ error: error.message || 'Delete failed' });
+    res.status(500).json({ error: 'Delete failed' });
   }
 });
 
@@ -531,50 +528,47 @@ app.post('/api/move-asset', verifyAdmin, async (req, res) => {
       return res.status(400).json({ error: 'url and toFolder are required' });
     }
 
-    const currentPublicId = getPublicIdFromUrl(url);
+    const folder = normalizeMoveFolder(toFolder);
+    if (!folder) {
+      return res.status(400).json({ error: 'toFolder must contain letters, numbers, "/", "_" or "-"' });
+    }
+
+    const asset = parseCloudinaryUrl(url);
     // Externally pasted (non-Cloudinary) URLs can't be moved — return as-is.
-    if (!currentPublicId) {
+    if (!asset) {
       return res.json({ result: 'skipped', secure_url: url });
     }
 
-    const basename = currentPublicId.split('/').pop();
-    const targetFolder = `team-rotor/${toFolder}`;
-    const newPublicId = `${targetFolder}/${basename}`;
+    const basename = asset.publicId.split('/').pop();
+    const newPublicId = `team-rotor/${folder}/${basename}`;
 
     // Already in the right place — nothing to do.
-    if (newPublicId === currentPublicId) {
+    if (newPublicId === asset.publicId) {
       return res.json({ result: 'unchanged', secure_url: url });
     }
 
-    // Cloudinary rename defaults to resource_type 'image'. Fall back to
-    // video/raw if the asset isn't an image (mirrors /api/delete-asset).
+    // The resource type comes from the URL itself, so there is one rename call
+    // and its real error surfaces. overwrite is off: a move must never replace
+    // an unrelated asset that already has the target name.
     let result;
     try {
-      result = await cloudinary.uploader.rename(currentPublicId, newPublicId, { overwrite: true });
-    } catch {
-      try {
-        result = await cloudinary.uploader.rename(currentPublicId, newPublicId, { overwrite: true, resource_type: 'video' });
-      } catch {
-        result = await cloudinary.uploader.rename(currentPublicId, newPublicId, { overwrite: true, resource_type: 'raw' });
+      result = await cloudinary.uploader.rename(asset.publicId, newPublicId, {
+        resource_type: asset.resourceType,
+        overwrite: false,
+      });
+    } catch (error) {
+      const message = String(error?.message || error?.error?.message || '');
+      if (/already exists/i.test(message)) {
+        return res.status(409).json({ error: 'An asset with that name already exists in the target folder.' });
       }
+      throw error;
     }
 
-    // Re-apply the same delivery transformation used on upload so the optimized
-    // URL stays consistent with everything else in the app.
-    let optimizedUrl = result.secure_url;
-    if (result.resource_type === 'video') {
-      const parts = result.secure_url.split('/upload/');
-      optimizedUrl = `${parts[0]}/upload/f_auto,q_auto:eco/${parts[1]}`;
-    } else if (result.resource_type === 'image') {
-      const parts = result.secure_url.split('/upload/');
-      optimizedUrl = `${parts[0]}/upload/c_limit,w_1200,f_auto,q_auto/${parts[1]}`;
-    }
-
-    console.log('[Cloudinary Move]', { from: currentPublicId, to: result.public_id });
-    res.json({ result: 'ok', secure_url: optimizedUrl, public_id: result.public_id, resource_type: result.resource_type });
+    console.log('[Cloudinary Move]', { from: asset.publicId, to: result.public_id });
+    res.json({ result: 'ok', secure_url: optimizedDeliveryUrl(result), public_id: result.public_id, resource_type: result.resource_type });
   } catch (error) {
     console.error('[Cloudinary Move] Error:', error);
-    res.status(500).json({ error: error.message || 'Move failed' });
+    res.status(500).json({ error: 'Move failed' });
   }
 });
 
@@ -610,7 +604,7 @@ app.post('/api/upload-model', verifyAdmin, uploadLimiter, upload.single('model')
     }
 
     // Sanitize the folder and build a collision-proof object path.
-    const folder = (req.body.folder || 'models').replace(/[^a-zA-Z0-9/_-]/g, '');
+    const folder = sanitizeFolder(req.body.folder || 'models') || 'models';
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const path = `${folder}/${unique}.${outExt}`;
     const contentType = outExt === 'glb' ? 'model/gltf-binary' : 'model/gltf+json';
@@ -625,7 +619,7 @@ app.post('/api/upload-model', verifyAdmin, uploadLimiter, upload.single('model')
     res.json({ url: data.publicUrl, path, optimized });
   } catch (error) {
     console.error('Model upload error:', error);
-    res.status(500).json({ error: error.message || 'Model upload failed' });
+    res.status(500).json({ error: 'Model upload failed' });
   }
 });
 
@@ -641,7 +635,7 @@ app.post('/api/delete-model', verifyAdmin, async (req, res) => {
     res.json({ result: 'ok' });
   } catch (error) {
     console.error('Model delete error:', error);
-    res.status(500).json({ error: error.message || 'Model delete failed' });
+    res.status(500).json({ error: 'Model delete failed' });
   }
 });
 
@@ -749,10 +743,13 @@ ${submissionDate} IST`;
 
 // ── Visitor Analytics ──
 // Public endpoint the frontend pings on each page view. The real client IP is
-// resolved by getClientIp() (first public address in the forwarded chain); we
+// resolved by getClientIp() (rightmost public address in the forwarded chain); we
 // then look up a coarse location offline with geoip-lite — no external API call,
-// no API key. Writes go through the Admin SDK, so the 'visits' collection stays
+// no API key. Only a keyed hash of the IP is stored, never the IP itself or
+// coordinates (see visitPrivacy.js). Writes go through the Admin SDK, so the 'visits' collection stays
 // fully locked down by the default-deny Firestore rule (no client read/write).
+const VISITOR_SECRET = visitorHashSecret(process.env, serviceAccount);
+
 const trackLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 30,             // cap pageview spam per IP
@@ -776,15 +773,16 @@ app.post('/api/track', trackLimiter, async (req, res) => {
     const path = typeof req.body?.path === 'string' ? req.body.path.slice(0, 200) : '/';
     const geo = geoip.lookup(ip) || null;
 
+    const now = new Date();
     await db.collection('visits').add({
-      ip,
+      visitorId: visitorId(ip, VISITOR_SECRET),
       path,
       userAgent: ua,
       country: geo?.country || null, // ISO-2 country code, e.g. "IN"
       region: geo?.region || null,
       city: geo?.city || null,
-      ll: geo?.ll || null,           // [latitude, longitude]
-      timestamp: new Date(),
+      timestamp: now,
+      expireAt: visitExpiry(now),    // deleted by the Firestore TTL policy on visits.expireAt
     });
 
     res.status(204).end();
@@ -797,7 +795,7 @@ app.post('/api/track', trackLimiter, async (req, res) => {
 
 // Admin-only analytics summary for the dashboard Traffic tab.
 // Accurate lifetime total comes from a cheap count() aggregation; the breakdowns
-// (unique IPs, country split, recent feed) are computed over the most recent
+// (unique visitors, country split, recent feed) are computed over the most recent
 // ANALYTICS_SCAN_LIMIT visits to keep per-request reads bounded.
 const ANALYTICS_SCAN_LIMIT = 2000;
 
@@ -811,7 +809,7 @@ app.get('/api/analytics', verifyAdmin, async (req, res) => {
     const now = Date.now();
     const DAY = 24 * 60 * 60 * 1000;
 
-    const uniqueIps = new Set();
+    const uniqueVisitors = new Set();
     const countryCounts = {};
     const recent = [];
     let last24h = 0;
@@ -822,7 +820,10 @@ app.get('/api/analytics', verifyAdmin, async (req, res) => {
       const ts = v.timestamp?.toDate ? v.timestamp.toDate() : new Date(v.timestamp);
       const age = now - ts.getTime();
 
-      if (v.ip) uniqueIps.add(v.ip);
+      // Older visits still hold a raw ip: hash it the same way so it counts
+      // as the same visitor and the IP itself never leaves the server.
+      const visitor = v.visitorId || visitorId(v.ip, VISITOR_SECRET);
+      if (visitor) uniqueVisitors.add(visitor);
       if (age <= DAY) last24h += 1;
       if (age <= 7 * DAY) last7d += 1;
 
@@ -831,7 +832,7 @@ app.get('/api/analytics', verifyAdmin, async (req, res) => {
 
       if (recent.length < 100) {
         recent.push({
-          ip: v.ip || '',
+          visitor: visitor || '',
           city: v.city || '',
           region: v.region || '',
           country,
@@ -849,7 +850,7 @@ app.get('/api/analytics', verifyAdmin, async (req, res) => {
       totalVisits: countSnap.data().count,
       scannedWindow: snap.size,           // breakdowns below are over this many recent visits
       windowCapped: snap.size === ANALYTICS_SCAN_LIMIT,
-      uniqueVisitors: uniqueIps.size,
+      uniqueVisitors: uniqueVisitors.size,
       last24h,
       last7d,
       byCountry,
@@ -865,9 +866,9 @@ app.get('/api/analytics', verifyAdmin, async (req, res) => {
 app.get('/api/logs', verifySuperAdmin, async (req, res) => {
   try {
     const limitNum = 200; // Fetch top 200 from each to ensure good overlap
-    const [activitySnap, auditSnap, contactSnap] = await Promise.all([
+    const [activitySnap, auditLogs, contactSnap] = await Promise.all([
       db.collection('activity_logs').orderBy('timestamp', 'desc').limit(limitNum).get(),
-      db.collection('audit_logs').orderBy('timestamp', 'desc').limit(limitNum).get(),
+      fetchAuditLogs(db, limitNum), // handles every stored audit shape, see auditLog.js
       db.collection('contact_messages').orderBy('createdAt', 'desc').limit(limitNum).get()
     ]);
 
@@ -878,30 +879,18 @@ app.get('/api/logs', verifySuperAdmin, async (req, res) => {
       logs.push({
         id: doc.id,
         type: 'activity',
-        user: data.userEmail,
+        user: data.userEmail, // enforced == the writer's own email by firestore.rules
         action: data.actionType,
         target: data.targetType,
         details: data.details,
-        timestamp: data.timestamp // ISO string from client
+        // The `timestamp` field is supplied by the client and can be faked, so
+        // show Firestore's own server-side write time instead. (The query above
+        // still orders by `timestamp`, the only indexed field older docs have.)
+        timestamp: doc.createTime.toDate().toISOString(),
       });
     });
 
-    auditSnap.forEach(doc => {
-      const data = doc.data();
-      const isRoleChange = !!data.targetEmail;
-      
-      logs.push({
-        id: doc.id,
-        type: 'audit',
-        user: data.userEmail,
-        action: isRoleChange ? 'ROLE_CHANGE' : 'INVENTORY_UPDATE',
-        target: isRoleChange ? data.targetEmail : 'Inventory',
-        details: isRoleChange 
-          ? `${data.action} ${data.targetEmail}` 
-          : `${data.action}${data.newValue ? ` to ${data.newValue}` : ''}`,
-        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : new Date(data.timestamp).toISOString()
-      });
-    });
+    logs.push(...auditLogs);
 
     contactSnap.forEach(doc => {
       const data = doc.data();
@@ -953,150 +942,138 @@ async function buildReadableMirrors(tagIds = [], customFieldsMap = {}) {
   return { tagNames, customFieldsReadable };
 }
 
+// Write (or merge into) a provisioned member's users/{email} doc. Existing
+// verified members keep their active status; everyone else starts unverified.
+async function provisionMember({ email, name = '', tags, customFields }) {
+  const userRef = db.collection('users').doc(email);
+  const userDoc = await userRef.get();
+  const existing = userDoc.exists ? userDoc.data() : null;
+  const alreadyVerified = Boolean(existing && (existing.status === 'active' || existing.emailVerified));
+
+  // Readable mirrors so the raw Firestore doc is legible in the console.
+  const { tagNames, customFieldsReadable } = await buildReadableMirrors(tags, customFields);
+
+  await userRef.set({
+    email,
+    name,
+    jobTitle: '',
+    linkedin: '',
+    github: '',
+    roomNumber: '',
+    image: '',
+    tags,
+    tagNames,
+    customFields,
+    customFieldsReadable,
+    status: alreadyVerified ? (existing.status || 'active') : 'approved_unverified',
+    emailVerified: alreadyVerified,
+  }, { merge: true });
+
+  return { alreadyVerified };
+}
+
+// Turn a validation failure into a 400 and anything else into a generic 500.
+function sendRouteError(res, error, label) {
+  if (error instanceof InputError) return res.status(400).json({ error: error.message });
+  console.error(`${label}:`, error);
+  return res.status(500).json({ error: `${label} failed` });
+}
+
 app.post('/api/admin/requests/approve', verifySuperAdmin, async (req, res) => {
   try {
-    const { requestId, email, name, tags, customFields } = req.body;
-    
-    // Update request status to approved_unverified
-    await db.collection('join_requests').doc(requestId).update({ status: 'approved_unverified' });
+    const input = parseApproveRequest(req.body);
 
-    const userRef = db.collection('users').doc(email.toLowerCase());
-    const userDoc = await userRef.get();
-    
-    let statusToSet = 'approved_unverified';
-    let emailVerifiedToSet = false;
-    
-    if (userDoc.exists) {
-      const existingData = userDoc.data();
-      if (existingData.status === 'active' || existingData.emailVerified) {
-        statusToSet = existingData.status || 'active';
-        emailVerifiedToSet = true;
-      }
+    // Check the request first, and only mark it approved once the member is
+    // provisioned and emailed: a failure part-way leaves it pending to retry.
+    const requestRef = db.collection('join_requests').doc(input.requestId);
+    const requestSnap = await requestRef.get();
+    if (!requestSnap.exists) return res.status(404).json({ error: 'Join request not found' });
+    if (requestSnap.data().status === 'rejected') {
+      return res.status(409).json({ error: 'This request was rejected' });
     }
 
-    // Readable mirrors so the raw Firestore doc is legible in the console.
-    const { tagNames, customFieldsReadable } = await buildReadableMirrors(tags || [], customFields || {});
-
-    // Provision user with status active=false (unless already active)
-    await userRef.set({
-      email: email.toLowerCase(),
-      name: name || '',
-      jobTitle: '',
-      linkedin: '',
-      github: '',
-      roomNumber: '',
-      image: '',
-      tags: tags || [],
-      tagNames,
-      customFields: customFields || {},
-      customFieldsReadable,
-      status: statusToSet,
-      emailVerified: emailVerifiedToSet
-    }, { merge: true });
-
-    // Send verification email if not already verified
-    if (!emailVerifiedToSet) {
-      await sendVerificationEmail(email, 'onboarding', { tags });
+    const { alreadyVerified } = await provisionMember(input);
+    if (!alreadyVerified) {
+      await sendVerificationEmail(input.email, 'onboarding', { tags: input.tags });
     }
-    
-    // Log action
-    await db.collection('audit_logs').add({
-      action: 'join_request_approved',
-      actor: req.user.email,
-      target: email,
-      timestamp: new Date().toISOString()
-    });
+    await requestRef.update({ status: 'approved_unverified' });
+
+    await db.collection('audit_logs').add(
+      buildAuditEntry({ category: 'onboarding', action: 'join_request_approved', actor: req.user.email, target: input.email })
+    );
 
     res.json({ success: true });
   } catch (error) {
-    console.error("Error approving request:", error);
-    res.status(500).json({ error: error.message });
+    sendRouteError(res, error, 'Approving request');
   }
 });
 
-app.post('/api/resend-verification', contactLimiter, async (req, res) => {
+// Resend the onboarding email to the signed-in person only. It used to take
+// any email in the body, which let anyone check who is on the team (404 vs
+// 400) and send verification emails to any pending member. Admin.jsx keeps
+// the ID token from the moment it found the account unverified.
+// Per-account limit for endpoints that send email to the signed-in person.
+// Each call creates its own counter, so the endpoints don't share a budget
+// (they used to share contactLimiter with the public contact form).
+const accountEmailLimiter = () => rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `uid:${req.user.uid}`,
+});
+
+app.post('/api/resend-verification', verifyAuth, accountEmailLimiter(), async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email required' });
-
-    const userSnap = await db.collection('users').doc(email.toLowerCase()).get();
-    if (!userSnap.exists) {
-      return res.status(404).json({ error: 'User not found' });
+    if (req.user.email_verified !== true || !req.user.email) {
+      return res.status(403).json({ error: 'Sign in with your verified Google account first' });
+    }
+    const email = req.user.email.toLowerCase();
+    const userSnap = await db.collection('users').doc(email).get();
+    if (!userSnap.exists || userSnap.data().status !== 'approved_unverified') {
+      return res.status(409).json({ error: 'There is no pending verification for this account' });
     }
 
-    const userData = userSnap.data();
-    if (userData.status !== 'approved_unverified') {
-      return res.status(400).json({ error: 'User is not in an unverified state' });
-    }
-
-    await sendVerificationEmail(email, 'onboarding', { tags: userData.tags || [] });
+    await sendVerificationEmail(email, 'onboarding', { tags: userSnap.data().tags || [] });
     res.json({ success: true });
   } catch (error) {
-    console.error("Error resending verification:", error);
-    res.status(500).json({ error: error.message });
+    sendRouteError(res, error, 'Resending verification');
   }
 });
 
 app.post('/api/admin/users/create', verifySuperAdmin, async (req, res) => {
   try {
-    const { email, tags, customFields } = req.body;
-    
-    const userRef = db.collection('users').doc(email.toLowerCase());
-    const userDoc = await userRef.get();
-    
-    if (userDoc.exists) {
+    const input = parseCreateMember(req.body);
+
+    const existing = await db.collection('users').doc(input.email).get();
+    if (existing.exists) {
       return res.status(400).json({ error: 'User already exists' });
     }
 
-    // Readable mirrors so the raw Firestore doc is legible in the console.
-    const { tagNames, customFieldsReadable } = await buildReadableMirrors(tags || [], customFields || {});
+    await provisionMember(input);
+    await sendVerificationEmail(input.email, 'onboarding', { tags: input.tags });
 
-    // Provision user with status active=false
-    await userRef.set({
-      email: email.toLowerCase(),
-      name: '',
-      jobTitle: '',
-      linkedin: '',
-      github: '',
-      roomNumber: '',
-      image: '',
-      tags: tags || [],
-      tagNames,
-      customFields: customFields || {},
-      customFieldsReadable,
-      status: 'approved_unverified',
-      emailVerified: false
-    }, { merge: true });
-
-    // Send verification email
-    await sendVerificationEmail(email, 'onboarding', { tags });
-    
-    // Log action
-    await db.collection('audit_logs').add({
-      action: 'team_member_created',
-      actor: req.user.email,
-      target: email,
-      timestamp: new Date().toISOString()
-    });
+    await db.collection('audit_logs').add(
+      buildAuditEntry({ category: 'onboarding', action: 'team_member_created', actor: req.user.email, target: input.email })
+    );
 
     res.json({ success: true });
   } catch (error) {
-    console.error("Error creating user:", error);
-    res.status(500).json({ error: error.message });
+    sendRouteError(res, error, 'Creating user');
   }
 });
 
-app.post('/api/migrate/request', verifyAuth, contactLimiter, async (req, res) => {
+app.post('/api/migrate/request', verifyAuth, accountEmailLimiter(), async (req, res) => {
   try {
-    const { newEmail } = req.body;
+    const newEmail = parseEmail(req.body?.newEmail);
     const oldEmail = req.user.email;
-
-    if (!newEmail || typeof newEmail !== 'string') {
-      return res.status(400).json({ error: 'New email is required' });
+    if (req.user.email_verified !== true || !oldEmail) {
+      return res.status(403).json({ error: 'Sign in with your verified Google account first' });
     }
 
     // Check if new email already exists
-    const snap = await db.collection('users').doc(newEmail.toLowerCase()).get();
+    const snap = await db.collection('users').doc(newEmail).get();
     if (snap.exists) {
       return res.status(400).json({ error: 'An account with this email already exists' });
     }
@@ -1106,112 +1083,13 @@ app.post('/api/migrate/request', verifyAuth, contactLimiter, async (req, res) =>
 
     res.json({ success: true, message: 'Verification email sent' });
   } catch (error) {
-    console.error("Error requesting migration:", error);
-    res.status(500).json({ error: error.message });
+    sendRouteError(res, error, 'Requesting migration');
   }
 });
 
-app.get('/api/verify', async (req, res) => {
-  const token = req.query.token;
-  if (!token) {
-    return res.status(400).send('Missing token');
-  }
-
-  try {
-    const data = await verifyToken(token);
-    
-    if (data.type === 'onboarding') {
-      // Activate user
-      await db.collection('users').doc(data.email).update({
-        status: 'active',
-        emailVerified: true
-      });
-      return res.send('<div style="font-family: sans-serif; padding: 40px; text-align: center;"><h2 style="color: #2e7d32;">Email Verified Successfully!</h2><p>Your account is now active. You may return to the app and sign in.</p></div>');
-    } 
-    
-    if (data.type === 'migration') {
-      const { oldEmail } = data.metadata;
-      const newEmail = data.email;
-
-      // 1. Fetch old user
-      const oldSnap = await db.collection('users').doc(oldEmail).get();
-      if (!oldSnap.exists) {
-        return res.status(400).send('<div style="font-family: sans-serif; padding: 40px; text-align: center;"><h2 style="color: #d32f2f;">Migration Failed</h2><p>Old account not found or already migrated.</p></div>');
-      }
-      
-      const oldData = oldSnap.data();
-
-      // 2. Set new user
-      const newData = { ...oldData, email: newEmail };
-      await db.collection('users').doc(newEmail).set(newData);
-
-      // 3. Update team_members collection
-      const tmSnap = await db.collection('team_members').where('userId', '==', oldEmail).get();
-      if (!tmSnap.empty) {
-        const batch = db.batch();
-        tmSnap.docs.forEach(doc => {
-          batch.update(doc.ref, { userId: newEmail });
-        });
-        await batch.commit();
-      }
-
-      // 4. Update admin root table if exists
-      const adminSnap = await db.collection('admins').doc(oldEmail).get();
-      let hasAdmin = false;
-      let hasSuperAdmin = false;
-
-      if (adminSnap.exists) {
-        const adminData = adminSnap.data();
-        await db.collection('admins').doc(newEmail).set({ ...adminData, email: newEmail });
-        await db.collection('admins').doc(oldEmail).delete();
-        hasAdmin = true;
-        hasSuperAdmin = adminData.isRoot || adminData.isSuperAdmin || false;
-      }
-
-      // 5. Delete old user
-      await db.collection('users').doc(oldEmail).delete();
-
-      // 6. Migrate Firebase Auth Custom Claims
-      try {
-        let newAuthUser;
-        try {
-          newAuthUser = await getAuth().getUserByEmail(newEmail);
-        } catch (e) {
-          if (e.code === 'auth/user-not-found') {
-            newAuthUser = await getAuth().createUser({ email: newEmail });
-          } else {
-            throw e;
-          }
-        }
-        await getAuth().setCustomUserClaims(newAuthUser.uid, { admin: hasAdmin, superAdmin: hasSuperAdmin });
-
-        try {
-          const oldAuthUser = await getAuth().getUserByEmail(oldEmail);
-          await getAuth().setCustomUserClaims(oldAuthUser.uid, { admin: false, superAdmin: false });
-        } catch (e) {
-          // ignore if old user doesn't exist in auth
-        }
-      } catch (authErr) {
-        console.error("Auth claim migration error:", authErr);
-      }
-
-      // Log
-      await db.collection('audit_logs').add({
-        action: 'email_migrated',
-        actor: oldEmail,
-        target: newEmail,
-        timestamp: new Date().toISOString()
-      });
-
-      return res.send('<div style="font-family: sans-serif; padding: 40px; text-align: center;"><h2 style="color: #2e7d32;">Email Migration Successful!</h2><p>Your account has been securely moved. Please sign in with your new Google account.</p></div>');
-    }
-
-  } catch (error) {
-    console.error("Verification Error:", error);
-    const safeMsg = (error.message || 'Unknown error').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return res.status(400).send(`<div style="font-family: sans-serif; padding: 40px; text-align: center;"><h2 style="color: #d32f2f;">Verification Failed</h2><p>${safeMsg}</p></div>`);
-  }
-});
+// Email verification links: GET shows a confirm page, POST applies it inside a
+// Firestore transaction. See verifyFlow.js for why GET must not change state.
+app.use(createVerifyRouter({ db, auth: getAuth() }));
 
 // Handle multer errors (file too large, wrong type)
 app.use((err, req, res, next) => {

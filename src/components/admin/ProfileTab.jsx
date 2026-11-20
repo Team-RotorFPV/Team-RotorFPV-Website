@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, onSnapshot, updateDoc, setDoc, collection, query, orderBy, getDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { logAdminAction, uploadFile, fetchAdmins, syncUserPermissions, apiPost } from '../../lib/adminApi';
+import { logAdminAction, uploadFile, fetchAdmins, syncUserPermissions, permissionsFromTags, apiPost } from '../../lib/adminApi';
 import { expandTagIds, getGrantedTagIds, buildReadableMirrors } from '../../lib/tagGrants';
 
 const ProfileTab = ({ user }) => {
@@ -168,7 +168,7 @@ const ProfileTab = ({ user }) => {
         setNewEmail('');
         setTimeout(() => setShowMigrate(false), 3000);
       }
-    } catch (err) {
+    } catch {
       setMigrateMsg("An error occurred.");
     }
   };
@@ -196,6 +196,12 @@ const ProfileTab = ({ user }) => {
       if (user.isSuperAdmin) {
         payload.tags = expandTagIds(formData.tags || [], allTags);
         payload.tagNames = buildReadableMirrors(payload.tags, allTags, {}, customFields).tagNames;
+        // The server refuses self-demotion, so saving these tags would leave
+        // the doc saying "not super admin" while the claims still say it is.
+        if (!permissionsFromTags(payload.tags, allTags).superAdmin && !admins.find(a => a.email === userEmail)?.isRoot) {
+          alert("You can't remove your own Super Admin access. Ask another Super Admin to do it.");
+          return;
+        }
       }
 
       const docRef = doc(db, 'users', userEmail);
@@ -219,7 +225,7 @@ const ProfileTab = ({ user }) => {
       setProfileData(payload); // reset dirty state immediately
     } catch (error) {
       console.error("Error saving profile:", error);
-      alert("Failed to save profile. Make sure you're authorized.");
+      alert(error.message?.startsWith('Saved, but') ? error.message : "Failed to save profile. Make sure you're authorized.");
     } finally {
       setIsSaving(false);
     }

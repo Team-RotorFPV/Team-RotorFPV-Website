@@ -38,7 +38,7 @@ export const FPVCamera = ({ spline }) => {
     axis: new THREE.Vector3(),
   }), []);
 
-  useFrame((state, delta) => {
+  useFrame((state) => {
     if (!spline) return;
 
     // We no longer rely on external easing for `p` because FlightController handles smooth damping of globalCurrentProgress.

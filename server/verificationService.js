@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { getFirestore } from 'firebase-admin/firestore';
 import { Resend } from 'resend';
+import { hashToken } from './tokenHash.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -19,7 +20,7 @@ export async function sendVerificationEmail(email, type, metadata = {}) {
   
   // Generate secure token
   const token = crypto.randomBytes(32).toString('hex');
-  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+  const hashedToken = hashToken(token);
   
   // Expiration: 24 hours from now
   const expiresAt = new Date();
@@ -102,36 +103,4 @@ export async function sendVerificationEmail(email, type, metadata = {}) {
   }
 }
 
-/**
- * Verifies a token, returns the token doc if valid and unused.
- * @param {string} token 
- * @returns {Promise<object>} The token document data
- */
-export async function verifyToken(token) {
-  const db = getFirestore();
-  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
-  
-  const tokensRef = db.collection('verification_tokens');
-  const q = tokensRef.where('hashedToken', '==', hashedToken).limit(1);
-  const snap = await q.get();
-  
-  if (snap.empty) {
-    throw new Error('Invalid or expired token');
-  }
-
-  const tokenDoc = snap.docs[0];
-  const data = tokenDoc.data();
-
-  if (data.used) {
-    throw new Error('Token has already been used');
-  }
-
-  if (data.expiresAt.toDate() < new Date()) {
-    throw new Error('Token has expired');
-  }
-
-  // Mark as used
-  await tokenDoc.ref.update({ used: true, verifiedAt: new Date() });
-
-  return data;
-}
+// Token checking and use live in verifyFlow.js.

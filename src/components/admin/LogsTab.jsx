@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { fetchLogs } from '../../lib/adminApi';
+import useAsyncData from '../../hooks/useAsyncData';
 
 const LogsTab = () => {
-  const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const { data: logsData, loading, error: loadError, reload: loadLogs } = useAsyncData(fetchLogs);
+  const logs = logsData || [];
+  const error = loadError ? "Failed to load logs. You might not have permission." : null;
   const [filter, setFilter] = useState('all');
 
   const FILTERS = [
@@ -18,23 +19,6 @@ const LogsTab = () => {
   const logsWithoutVisits = logs.filter(log => log.type !== 'visit');
   const filteredLogs = logsWithoutVisits.filter(log => filter === 'all' ? true : log.type === filter);
 
-  const loadLogs = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await fetchLogs();
-      setLogs(data);
-    } catch (err) {
-      console.error("Failed to load logs:", err);
-      setError("Failed to load logs. You might not have permission.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadLogs();
-  }, []);
 
 
 

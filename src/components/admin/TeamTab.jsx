@@ -93,7 +93,7 @@ const TeamTab = () => {
       setTagsList(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    refreshAdmins();
+    fetchAdmins().then(setAdminsList).catch((e) => console.error("Error fetching admins:", e));
 
     return () => {
       unsubYears();

@@ -5,6 +5,7 @@ import Navbar from './components/Navbar';
 import Footer from './components/Footer';
 import ViewDropdown from './components/ViewDropdown';
 import ErrorBoundary from './components/ErrorBoundary';
+import { API_URL } from './lib/apiUrl';
 
 // The Silk background is a decorative full-screen WebGL shader that pulls in
 // three.js. Lazy-load it so the 1.4 MB three chunk streams in AFTER first paint
@@ -56,8 +57,7 @@ function AppContent() {
   // counted as traffic. The backend resolves the real IP + geolocation.
   useEffect(() => {
     if (location.pathname.startsWith('/admin')) return;
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-    fetch(`${apiUrl}/api/track`, {
+    fetch(`${API_URL}/api/track`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: location.pathname }),

@@ -113,7 +113,7 @@ const Masonry = ({
   useLayoutEffect(() => {
     if (!imagesReady || !grid.length) return;
 
-    grid.forEach((item, index) => {
+    grid.forEach((item) => {
       const selector = `[data-key="${item.id}"]`;
       const animationProps = {
         x: item.x,
@@ -139,7 +139,6 @@ const Masonry = ({
     });
 
     hasMounted.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [grid, imagesReady, stagger, animateFrom, blurToFocus, duration, ease]);
 
   const handleMouseEnter = (e, item) => {

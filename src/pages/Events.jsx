@@ -37,15 +37,21 @@ const formatCountdown = (target, now) => {
   return `${hours}h ${minutes}m ${totalSeconds % 60}s`;
 };
 
-const getCountdown = (event, lifecycle, now) => {
+const getCountdown = (event, lifecycle) => {
   if (lifecycle === 'upcoming') {
-    return { label: 'Starts in', value: formatCountdown(scheduleInstant(event.startDate, event.startTime || '00:00'), now) };
+    return { label: 'Starts in', target: scheduleInstant(event.startDate, event.startTime || '00:00') };
   }
   if (lifecycle === 'ongoing') {
-    const end = scheduleInstant(event.endDate || event.startDate, event.endTime || '23:59');
-    return { label: 'Ends in', value: formatCountdown(end, now) };
+    return { label: 'Ends in', target: scheduleInstant(event.endDate || event.startDate, event.endTime || '23:59') };
   }
   return null;
+};
+
+// The only part of the page that changes every second, so it keeps its own
+// clock and re-renders alone (the page itself ticks once a minute).
+const LiveCountdown = ({ target }) => {
+  const now = useEventNow(1000);
+  return formatCountdown(target, now);
 };
 
 const LIFECYCLE_LABELS = { ongoing: 'Live now', upcoming: 'Upcoming', past: 'Past' };
@@ -88,7 +94,7 @@ const EventMeta = ({ event }) => (
 
 const FeaturedEventCard = ({ event, lifecycle, now, onClick, highlighted }) => {
   const callToAction = getEventCallToAction(event, now);
-  const countdown = getCountdown(event, lifecycle, now);
+  const countdown = getCountdown(event, lifecycle);
 
   return (
     <article id={`event-${event.id}`} className={`event-feature ${lifecycle} ${highlighted ? 'event-card-highlighted' : ''}`}>
@@ -101,7 +107,7 @@ const FeaturedEventCard = ({ event, lifecycle, now, onClick, highlighted }) => {
           {countdown && (
             <span className="event-countdown">
               <span className="event-countdown-label">{countdown.label}</span>
-              <span className="event-countdown-value">{countdown.value}</span>
+              <span className="event-countdown-value"><LiveCountdown target={countdown.target} /></span>
             </span>
           )}
         </div>
@@ -150,7 +156,7 @@ const EventModal = ({ event, lifecycle, now, onClose }) => {
   const images = [...new Set([event.image, ...(event.galleryImages || [])].filter(Boolean))];
   const longDesc = event.longDescription?.trim() ? event.longDescription : (event.description || '');
   const callToAction = getEventCallToAction(event, now);
-  const countdown = getCountdown(event, lifecycle, now);
+  const countdown = getCountdown(event, lifecycle);
 
   useEffect(() => {
     const onKey = (keyEvent) => {
@@ -207,7 +213,7 @@ const EventModal = ({ event, lifecycle, now, onClose }) => {
             {countdown && (
               <span className="event-countdown">
                 <span className="event-countdown-label">{countdown.label}</span>
-                <span className="event-countdown-value">{countdown.value}</span>
+                <span className="event-countdown-value"><LiveCountdown target={countdown.target} /></span>
               </span>
             )}
           </div>

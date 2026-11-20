@@ -1,5 +1,4 @@
 import React, { useMemo } from 'react';
-import * as THREE from 'three';
 import { Line } from '@react-three/drei';
 import { useFPVCircuit } from '../FPVCircuitProvider';
 

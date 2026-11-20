@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy, getDocs, updateDoc, where } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { logAdminAction, fetchAdmins, apiPost, uploadFile, syncUserPermissions } from '../../lib/adminApi';
+import { logAdminAction, fetchAdmins, apiPost, syncUserPermissions } from '../../lib/adminApi';
 import { expandTagIds, getGrantedTagIds, buildReadableMirrors } from '../../lib/tagGrants';
 import TagsTab from './TagsTab';
 import CustomFieldsTab from './CustomFieldsTab';
-import PillNav from '../PillNav';
 
 const TeamMembersTab = ({ user }) => {
   const [subTab, setSubTab] = useState('members');
@@ -49,7 +48,7 @@ const TeamMembersTab = ({ user }) => {
       setJoinRequests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    refreshAdmins();
+    fetchAdmins().then(setAdmins).catch((error) => console.error(error));
 
     return () => {
       unsubFields();
@@ -133,7 +132,7 @@ const TeamMembersTab = ({ user }) => {
       setEditingEmail(null);
     } catch (error) {
       console.error("Error saving user:", error);
-      alert("Failed to save user");
+      alert(error.message || "Failed to save user");
     }
   };
 
@@ -260,7 +259,7 @@ const TeamMembersTab = ({ user }) => {
         <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem' }}>
           <button className={`admin-btn ${subTab === 'members' ? 'primary' : 'secondary'}`} onClick={() => setSubTab('members')}>Back to Members</button>
         </div>
-        <TagsTab user={user} />
+        <TagsTab />
       </div>
     );
   }
@@ -271,7 +270,7 @@ const TeamMembersTab = ({ user }) => {
         <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem' }}>
           <button className={`admin-btn ${subTab === 'members' ? 'primary' : 'secondary'}`} onClick={() => setSubTab('members')}>Back to Members</button>
         </div>
-        <CustomFieldsTab user={user} />
+        <CustomFieldsTab />
       </div>
     );
   }

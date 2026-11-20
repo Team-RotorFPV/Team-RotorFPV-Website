@@ -1,17 +1,11 @@
 import React, { useMemo, useEffect } from 'react';
 import * as THREE from 'three';
-import { useFPVCircuit } from '../FPVCircuitProvider';
 import { AchievementHologram } from '../holograms/AchievementHologram';
-import { Cone } from '@react-three/drei';
 
 import { NeonRing } from '../effects/NeonRing';
 
-export const AchievementGate = ({ gateData, index }) => {
-  const { activeGate } = useFPVCircuit();
-  // It's "active" if the user is approaching it or just passed it.
-  const isActive = activeGate === index;
-  
-  const { worldPosition, rotation, title } = gateData;
+export const AchievementGate = ({ gateData }) => {
+  const { worldPosition, rotation } = gateData;
   const placement = typeof gateData.position === 'string' ? gateData.position.toLowerCase() : '';
 
   const { geometry, outerGeo, innerGeo } = useMemo(() => {

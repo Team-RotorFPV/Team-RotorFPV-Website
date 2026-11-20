@@ -3,7 +3,7 @@ import { collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, order
 import { db } from '../../firebase';
 import { logAdminAction } from '../../lib/adminApi';
 
-const CustomFieldsTab = ({ user }) => {
+const CustomFieldsTab = () => {
   const [fields, setFields] = useState([]);
   const [newFieldName, setNewFieldName] = useState('');
   const [newFieldAskOnJoin, setNewFieldAskOnJoin] = useState(false);

@@ -1,8 +1,9 @@
-import { auth, db } from '../firebase';
+import { db } from '../firebase';
+import { auth } from '../firebaseAuth';
 import { collection, addDoc } from 'firebase/firestore';
-// Single source of truth for the backend base URL.
-// Previously this line was copy-pasted ~13 times across the admin UI.
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL } from './apiUrl';
+
+export { API_URL };
 
 const getIdToken = () => {
   if (!auth.currentUser) {
@@ -169,27 +170,34 @@ export async function fetchLogs() {
   return data.logs || [];
 }
 
-// Synchronize a user's admin/super-admin permissions based on their tags.
+// The admin / super-admin rights a set of tag IDs grants.
+export function permissionsFromTags(selectedTagIds, allTags) {
+  let admin = false;
+  let superAdmin = false;
+  for (const tagId of selectedTagIds || []) {
+    const tag = allTags.find(t => t.id === tagId);
+    if (tag?.grantsAdmin) admin = true;
+    if (tag?.grantsSuperAdmin) {
+      admin = true; // Super admin implies admin
+      superAdmin = true;
+    }
+  }
+  return { admin, superAdmin };
+}
+
+// Synchronize a user's admin/super-admin claims with their tags.
 // email: The user's email
 // selectedTagIds: Array of tag IDs the user currently has
 // allTags: Array of all tag objects from Firestore
 // currentAdmins: Array of all admin objects from /api/admins
+//
+// Throws if any server call fails, with the server's reason. Before, every
+// result was ignored, so the tags in Firestore and the real claims could
+// drift apart with nobody told.
 export async function syncUserPermissions(email, selectedTagIds, allTags, currentAdmins) {
-  let targetIsAdmin = false;
-  let targetIsSuperAdmin = false;
-
-  // Calculate desired permissions from tags
-  for (const tagId of selectedTagIds) {
-    const tag = allTags.find(t => t.id === tagId);
-    if (tag?.grantsAdmin) targetIsAdmin = true;
-    if (tag?.grantsSuperAdmin) {
-      targetIsAdmin = true; // Super admin implies admin
-      targetIsSuperAdmin = true;
-    }
-  }
-
+  const target = permissionsFromTags(selectedTagIds, allTags);
   const currentAdminRec = currentAdmins.find(a => a.email === email);
-  
+
   // Safety check: Never demote root through this UI
   if (currentAdminRec?.isRoot) {
     return;
@@ -198,17 +206,17 @@ export async function syncUserPermissions(email, selectedTagIds, allTags, curren
   const currentIsAdmin = !!currentAdminRec;
   const currentIsSuperAdmin = currentAdminRec?.isSuperAdmin || false;
 
-  // Handle Admin Promotion/Demotion
-  if (targetIsAdmin && !currentIsAdmin) {
-    await apiPost('/api/setAdmin', { email });
-  } else if (!targetIsAdmin && currentIsAdmin) {
-    await apiPost('/api/removeAdmin', { email });
-  }
+  const steps = [];
+  if (target.admin && !currentIsAdmin) steps.push('/api/setAdmin');
+  else if (!target.admin && currentIsAdmin) steps.push('/api/removeAdmin');
+  if (target.superAdmin && !currentIsSuperAdmin) steps.push('/api/setSuperAdmin');
+  // removeAdmin already clears the super-admin claim.
+  else if (!target.superAdmin && currentIsSuperAdmin && target.admin) steps.push('/api/removeSuperAdmin');
 
-  // Handle Super Admin Promotion/Demotion
-  if (targetIsSuperAdmin && !currentIsSuperAdmin) {
-    await apiPost('/api/setSuperAdmin', { email });
-  } else if (!targetIsSuperAdmin && currentIsSuperAdmin) {
-    await apiPost('/api/removeSuperAdmin', { email });
+  for (const path of steps) {
+    const { ok, data } = await apiPost(path, { email });
+    if (!ok) {
+      throw new Error(`Saved, but permissions for ${email} were not updated: ${data.error || 'server error'}. Their tags and access now differ; fix the tags and save again.`);
+    }
   }
 }

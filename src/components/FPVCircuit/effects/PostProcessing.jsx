@@ -1,6 +1,5 @@
 import React from 'react';
-import { EffectComposer, Bloom, ChromaticAberration, DepthOfField, Vignette } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
+import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { useFPVCircuit } from '../FPVCircuitProvider';
 
 export const CircuitPostProcessing = () => {

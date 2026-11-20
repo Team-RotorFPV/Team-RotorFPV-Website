@@ -1,6 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
-import { db } from '../firebase';
 
 /* Brand icons (react-icons) */
 import { FaInstagram, FaLinkedin, FaYoutube, FaGithub, FaFacebook, FaWhatsapp, FaDiscord, FaSpotify, FaTwitch } from 'react-icons/fa';
@@ -56,6 +54,12 @@ const Footer = () => {
   useEffect(() => {
     const fetchLinks = async () => {
       try {
+        // Footer is on every page and in the main chunk, so Firebase is loaded
+        // on demand; a static import pulled all of Firestore into first paint.
+        const [{ db }, { collection, getDocs, query, orderBy }] = await Promise.all([
+          import('../firebase'),
+          import('firebase/firestore'),
+        ]);
         const q = query(collection(db, 'social_links'), orderBy('order', 'asc'));
         const snapshot = await getDocs(q);
         const data = snapshot.docs

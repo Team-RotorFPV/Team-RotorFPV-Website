@@ -66,9 +66,56 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // Same membership test as the server's isActiveMember() (server/auth.js):
+    // a users/{email} doc that is not archived, not deactivated, and has no
+    // status other than 'active' (legacy docs without a status count as active).
+    // Email-matched rules only trust a verified address. Google sign-in always
+    // verifies, but if email/password sign-in is ever enabled, an unverified
+    // account registered under someone else's address must not count as them.
+    function hasVerifiedEmail() {
+      return request.auth != null
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true;
+    }
+
+    function isActiveTeamMember() {
+      let path = /databases/$(database)/documents/users/$(request.auth.token.email.lower());
+      let user = get(path).data;
+      return hasVerifiedEmail()
+        && exists(path)
+        && user.get('isArchived', false) != true
+        && user.get('isActive', true) != false
+        && user.get('status', 'active') in ['active', ''];
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data)
+        || data[field] == null
+        || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // Append-only audit trail written by every app's logAdminAction().
+    // Only verified team members (or admins) may write, only under their own
+    // email, with the fixed field set. No one can edit or delete an entry.
+    // `timestamp` is still the client's ISO string so already-installed app
+    // builds keep logging; a server timestamp (== request.time) is also
+    // accepted so clients can move to serverTimestamp() later.
     match /activity_logs/{docId} {
       allow read: if isAdmin();
-      allow create: if request.auth != null;
+      allow create: if request.auth != null
+        && request.auth.token.email_verified == true
+        && (isAdmin() || isSuperAdmin() || isActiveTeamMember())
+        && request.resource.data.keys().hasOnly(['userEmail', 'actionType', 'targetType', 'details', 'timestamp'])
+        && request.resource.data.userEmail == request.auth.token.email
+        && request.resource.data.actionType is string
+        && request.resource.data.actionType.size() > 0
+        && request.resource.data.actionType.size() <= 100
+        && isOptionalString(request.resource.data, 'targetType', 300)
+        && isOptionalString(request.resource.data, 'details', 5000)
+        && (request.resource.data.timestamp == request.time
+            || (request.resource.data.timestamp is string
+                && request.resource.data.timestamp.size() <= 40));
+      allow update, delete: if false;
     }
 
     match /audit_logs/{docId} {
@@ -80,19 +127,45 @@ service cloud.firestore {
       allow read, update, delete: if isAdmin();
     }
 
-    match /users/{docId} {
-      allow read: if isAdmin() || isInventoryAdmin() || (request.auth != null && request.auth.token.email.lower() == docId);
-      allow create: if request.auth != null && request.auth.token.email.lower() == docId &&
-        (!request.resource.data.keys().hasAny(['tags', 'permissions', 'isActive', 'isArchived']));
-      allow update: if isSuperAdmin() ||
-                    (isAdmin() && request.auth.token.email.lower() != docId) ||
-                    (request.auth != null && request.auth.token.email.lower() == docId &&
-                     !request.resource.data.diff(resource.data).affectedKeys().hasAny(['permissions', 'tags', 'isAdmin', 'isSuperAdmin', 'boardGroup']));
-      allow delete: if isAdmin();
+    // Fields that decide who someone is and what they may do. Tags drive admin
+    // and super-admin claims (syncUserPermissions), and status/emailVerified/
+    // isActive/isArchived decide team membership (see isActiveTeamMember above
+    // and isActiveMember in server/auth.js). Only super admins (or the server's
+    // Admin SDK) may change them.
+    function permissionFields() {
+      return ['tags', 'tagNames', 'permissions', 'isAdmin', 'isSuperAdmin', 'boardGroup',
+              'status', 'emailVerified', 'isActive', 'isArchived'];
     }
 
+    function isSelf(docId) {
+      return hasVerifiedEmail() && request.auth.token.email.lower() == docId;
+    }
+
+    match /users/{docId} {
+      allow read: if isAdmin() || isInventoryAdmin() || isSelf(docId);
+      // Members are provisioned by the server (join-request approval / admin
+      // create). A client may only create its own doc if it already holds an
+      // admin claim (e.g. the root admin's first profile save), and even then
+      // without permission fields — otherwise any Google account could create
+      // users/<its email> with status 'active' and pass every membership check.
+      allow create: if isSuperAdmin()
+        || (isSelf(docId) && isAdmin()
+            && !request.resource.data.keys().hasAny(permissionFields()));
+      // Regular admins can edit other users' profile details, but never
+      // permission fields: otherwise an admin could tag someone (or set up a
+      // future promotion) as Super Admin. Users can edit their own profile,
+      // again without permission fields.
+      allow update: if isSuperAdmin()
+        || ((isAdmin() || isSelf(docId))
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(permissionFields()));
+      allow delete: if isSuperAdmin();
+    }
+
+    // Tag definitions carry grantsAdmin / grantsSuperAdmin / grantsTags, so
+    // editing one is the same as granting permissions to everyone who holds it.
     match /tags/{docId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      allow write: if isSuperAdmin();
     }
 
     match /custom_fields/{docId} {

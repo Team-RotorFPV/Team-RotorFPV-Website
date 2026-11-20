@@ -4,7 +4,7 @@ import { db } from '../../firebase';
 import { logAdminAction } from '../../lib/adminApi';
 import { buildReadableMirrors } from '../../lib/tagGrants';
 
-const TagsTab = ({ user }) => {
+const TagsTab = () => {
   const [tags, setTags] = useState([]);
   
   const [newTagName, setNewTagName] = useState('');

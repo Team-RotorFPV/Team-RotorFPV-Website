@@ -7,7 +7,7 @@ import Seo from '../components/Seo';
 const FormalAchievements = () => {
   const [achievements, setAchievements] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selectedYear, setSelectedYear] = useState('');
+  const [chosenYear, setSelectedYear] = useState('');
   const pillRef = React.useRef(null);
   const isWheelScrollingRef = React.useRef(false);
 
@@ -44,16 +44,14 @@ const FormalAchievements = () => {
     return [...new Set(years)].sort((a, b) => b - a);
   }, [achievements]);
 
-  useEffect(() => {
-    if (availableYears.length > 0) {
-      const sharedYear = sessionStorage.getItem('shared_year');
-      if (sharedYear && availableYears.includes(sharedYear)) {
-        if (!selectedYear) setSelectedYear(sharedYear);
-      } else if (!selectedYear) {
-        setSelectedYear(availableYears[0]);
-      }
-    }
-  }, [availableYears, selectedYear]);
+  // Until someone picks a year: the year shared from the other achievements
+  // view if it exists here, otherwise the newest. Derived, not set in an effect.
+  const defaultYear = useMemo(() => {
+    let sharedYear = null;
+    try { sharedYear = sessionStorage.getItem('shared_year'); } catch { /* storage blocked */ }
+    return sharedYear && availableYears.includes(sharedYear) ? sharedYear : (availableYears[0] || '');
+  }, [availableYears]);
+  const selectedYear = chosenYear || defaultYear;
 
   const activeIndex = availableYears.indexOf(selectedYear);
 

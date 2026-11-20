@@ -100,7 +100,7 @@ const Gallery = () => {
         setHeroImgUrl("/TRFPV_Assets/team_rotor_fpv_group_photo.png");
       }
       setLoadingHero(false);
-    }, (error) => {
+    }, () => {
       setHeroImgUrl("/TRFPV_Assets/team_rotor_fpv_group_photo.png");
       setLoadingHero(false);
     });

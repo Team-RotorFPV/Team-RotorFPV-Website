@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
-import { auth, db } from '../firebase';
+import { db } from '../firebase';
+import { auth } from '../firebaseAuth';
+import { API_URL } from '../lib/adminApi';
 import { User } from 'lucide-react';
 import HomeSettingsTab from '../components/admin/HomeSettingsTab';
 import EventsTab from '../components/admin/EventsTab';
@@ -27,7 +29,9 @@ const TABS = [
   { key: 'drones', label: 'Drones', adminOnly: true },
   { key: 'home', label: 'Home Page', adminOnly: true },
   { key: 'achievements', label: 'Achievements', adminOnly: true },
-  { key: 'team', label: 'Board', adminOnly: true },
+  // Super-admin only: putting someone on the current Board gives them the
+  // Board tag, which grants super admin. Firestore rules enforce this too.
+  { key: 'team', label: 'Board', superAdminOnly: true },
   { key: 'events', label: 'Events', adminOnly: true },
   { key: 'socials', label: 'Socials', adminOnly: true },
 
@@ -40,9 +44,9 @@ const TABS = [
 const Admin = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('profile');
+  const [selectedTab, setActiveTab] = useState('profile');
   const [accessDenied, setAccessDenied] = useState(false);
-  const [unverifiedEmail, setUnverifiedEmail] = useState('');
+  const resendTokenRef = useRef(null);
   const [showJoinForm, setShowJoinForm] = useState(false);
   const [requestSubmitted, setRequestSubmitted] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
@@ -90,8 +94,9 @@ const Admin = () => {
         }
 
         if (!isVerified) {
-          localStorage.setItem('unverifiedEmail', currentUser.email);
-          setUnverifiedEmail(currentUser.email);
+          // Keep this account's ID token (valid for an hour) so "Resend
+          // Verification Email" can prove who is asking after we sign out.
+          resendTokenRef.current = await currentUser.getIdToken();
           await signOut(auth);
           setAccessDenied('unverified');
           setLoading(false);
@@ -124,12 +129,9 @@ const Admin = () => {
     return () => unsub();
   }, [user]);
 
-  // Ensure non-admins default to profile
-  useEffect(() => {
-    if (user && !user.isAdmin && activeTab !== 'profile') {
-      setActiveTab('profile');
-    }
-  }, [user, activeTab]);
+  // Non-admins only ever see their profile. Derived during render rather than
+  // corrected in an effect, which rendered the wrong tab first.
+  const activeTab = user && !user.isAdmin ? 'profile' : selectedTab;
 
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
@@ -196,28 +198,29 @@ const Admin = () => {
               <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 <button 
                   onClick={async () => {
-                    const emailToVerify = unverifiedEmail || localStorage.getItem('unverifiedEmail');
-                    console.log("Resending for email:", emailToVerify);
-                    if (!emailToVerify) {
-                      alert("Email is missing in state. Please try logging in again.");
+                    const idToken = resendTokenRef.current;
+                    if (!idToken) {
+                      alert("Please sign in again, then resend the email.");
                       return;
                     }
                     try {
-                      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/api/resend-verification`, {
+                      const res = await fetch(`${API_URL}/api/resend-verification`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email: emailToVerify })
+                        headers: { Authorization: `Bearer ${idToken}` },
                       });
                       if (res.ok) {
                         alert("Verification email resent!");
+                      } else if (res.status === 401) {
+                        resendTokenRef.current = null;
+                        alert("Your sign-in has expired. Please sign in again, then resend the email.");
                       } else {
-                        const err = await res.json();
+                        const err = await res.json().catch(() => ({}));
                         alert(err.error || "Failed to resend email.");
                       }
-                    } catch (e) {
+                    } catch {
                       alert("Network error.");
                     }
-                  }} 
+                  }}
                   className="admin-btn primary"
                 >
                   Resend Verification Email
@@ -271,7 +274,7 @@ const Admin = () => {
       case 'home': return <HomeSettingsTab user={user} />;
       case 'achievements': return <AchievementsTab />;
       case 'gallery': return <GalleryTab />;
-      case 'team': return <TeamTab />;
+      case 'team': return user.isSuperAdmin ? <TeamTab /> : null;
       case 'events': return <EventsTab user={user} />;
       case 'drones': return <DronesTab user={user} />;
       case 'sponsors': return <SponsorsTab user={user} />;

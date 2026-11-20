@@ -25,8 +25,11 @@ const DronesTab = ({ user }) => {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isUploadingModel, setIsUploadingModel] = useState(false);
   const [formData, setFormData] = useState(EMPTY_DRONE_FORM);
-  const [nodeNames, setNodeNames] = useState([]); // part names read from the model
-  const [loadingNodes, setLoadingNodes] = useState(false);
+  // Part names read from the model, tagged with the URL they came from, so
+  // "loading" and "no model" are derived instead of set inside the effect.
+  const [modelParts, setModelParts] = useState({ url: null, names: [] });
+  const nodeNames = formData.modelUrl && modelParts.url === formData.modelUrl ? modelParts.names : [];
+  const loadingNodes = Boolean(formData.modelUrl) && modelParts.url !== formData.modelUrl;
   const [showHelp, setShowHelp] = useState(false);
   const imageInputRef = useRef(null);
   const modelInputRef = useRef(null);
@@ -47,29 +50,27 @@ const DronesTab = ({ user }) => {
   // top-level node names — fully automatic, no AI/manual step. These become the
   // checklist of parts the admin can mark as interactive.
   useEffect(() => {
-    if (!formData.modelUrl) { setNodeNames([]); return; }
+    const url = formData.modelUrl;
+    if (!url) return undefined;
     let cancelled = false;
-    setLoadingNodes(true);
     const loader = new GLTFLoader();
     const draco = new DRACOLoader();
     // Self-hosted Draco decoder (public/draco/) — no third-party CDN at runtime.
     draco.setDecoderPath('/draco/');
     loader.setDRACOLoader(draco);
     loader.load(
-      formData.modelUrl,
+      url,
       (gltf) => {
         if (cancelled) return;
         const names = gltf.scene.children.map((n) => n.name).filter(Boolean);
-        setNodeNames(names);
-        setLoadingNodes(false);
+        setModelParts({ url, names });
         draco.dispose();
       },
       undefined,
       (err) => {
         if (cancelled) return;
         console.error('Failed to read model parts:', err);
-        setNodeNames([]);
-        setLoadingNodes(false);
+        setModelParts({ url, names: [] });
         draco.dispose();
       },
     );

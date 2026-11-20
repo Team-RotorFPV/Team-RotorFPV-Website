@@ -5,7 +5,9 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'server', 'src/scripts']),
+  // Built output, the Node server (own tooling), one-off scripts, and vendored
+  // third-party files in public/ (e.g. the Draco decoder).
+  globalIgnores(['dist', 'server', 'src/scripts', 'public']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

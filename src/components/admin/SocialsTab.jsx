@@ -11,7 +11,7 @@ import { FaXTwitter, FaThreads, FaTelegram as FaTelegramBrand } from 'react-icon
 import {
   Mail, Globe, Link as LinkIcon, Phone, MapPin, Music,
   ShoppingBag, FileText, Calendar, Users, Rss, Disc,
-  ExternalLink, GripVertical, Plus, Pencil, Trash2, Eye, EyeOff,
+  ExternalLink, Eye, EyeOff,
 } from 'lucide-react';
 
 /* ── All supported icons ── */

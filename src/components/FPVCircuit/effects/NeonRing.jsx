@@ -1,16 +1,16 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 
 export const NeonRing = ({ geometry, color = "#FF5722", baseIntensity = 15 }) => {
   const materialRef = useRef();
   
   // Create a unique random offset for this specific ring so they don't all flicker at the exact same time
-  const randomOffset = useRef(Math.random() * 100);
+  const [randomOffset] = useState(() => Math.random() * 100);
 
   useFrame((state) => {
     if (!materialRef.current) return;
     
-    const t = state.clock.elapsedTime + randomOffset.current;
+    const t = state.clock.elapsedTime + randomOffset;
     
     // We want a sparse, glitchy flicker. 
     // We use a combination of low frequency sine wave and random noise.

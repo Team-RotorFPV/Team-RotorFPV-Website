@@ -1,10 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useFPVCircuit } from '../FPVCircuitProvider';
-import { setTargetProgress, resetProgress } from '../utils/progress';
+import { resetProgress } from '../utils/progress';
 
 export const OSDOverlay = ({ progress, allIslandsData }) => {
   const { availableYears } = useFPVCircuit();
-  const [time, setTime] = useState(0);
   const pillRef = useRef(null);
   const isWheelScrollingRef = useRef(false);
 
@@ -27,7 +26,6 @@ export const OSDOverlay = ({ progress, allIslandsData }) => {
     }
   }
 
-  const selectedYear = activeIsland?.year || "---";
 
   const hasSyncedRef = useRef(false);
 
@@ -87,40 +85,14 @@ export const OSDOverlay = ({ progress, allIslandsData }) => {
     return () => pill.removeEventListener('wheel', handleWheel);
   }, [activeIslandIndex, availableYears, allIslandsData]);
 
-  // Flight timer
-  useEffect(() => {
-    const interval = setInterval(() => setTime(t => t + 1), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const formatTime = (seconds) => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  let currentYear = selectedYear;
-  let achievementCount = "-";
-  let totalCount = "-";
+  // (A flight timer used to tick here every second, re-rendering the whole
+  // overlay for a value that was never displayed.)
   let warningText = "";
 
   if (activeIsland) {
-    const achievementsOnly = activeIsland.checkpoints?.filter(cp => cp.type === 'achievement') || [];
-    const totalAchievements = achievementsOnly.length;
-    
-    if (totalAchievements > 0) {
-      // Find which achievement we have passed
-      let currentAchIndex = 0;
-      for (let i = 0; i < achievementsOnly.length; i++) {
-        if (progress >= achievementsOnly[i].progress - 0.05) {
-          currentAchIndex = i + 1;
-        } else {
-          break;
-        }
-      }
-      achievementCount = Math.max(1, currentAchIndex);
-      totalCount = totalAchievements;
-      
+    const hasAchievements = activeIsland.checkpoints?.some(cp => cp.type === 'achievement');
+
+    if (hasAchievements) {
       if (progress < 0.01) {
         warningText = "SCROLL TO ARM";
       }

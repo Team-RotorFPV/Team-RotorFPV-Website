@@ -11,7 +11,7 @@ const SEGMENT_TYPES = ['straight', 'curve_left', 'curve_right', 'hairpin', 'dive
 export const FPVCircuitProvider = ({ children, rawAchievements }) => {
   const [quality, setQuality] = useState('high');
   const [activeGate, setActiveGate] = useState(null);
-  const [selectedYear, setSelectedYear] = useState(null);
+  const [chosenYear, setSelectedYear] = useState(null);
   
   useEffect(() => {
     detectQuality().then(({ quality }) => setQuality(quality));
@@ -71,11 +71,8 @@ export const FPVCircuitProvider = ({ children, rawAchievements }) => {
     return yearCircuits.map(c => c.year);
   }, [yearCircuits]);
 
-  useEffect(() => {
-    if (availableYears.length > 0 && !selectedYear) {
-      setSelectedYear(availableYears[0]); // Descending order, so first is newest
-    }
-  }, [availableYears, selectedYear]);
+  // Until someone picks a year, show the newest (availableYears is descending).
+  const selectedYear = chosenYear ?? availableYears[0] ?? null;
 
   return (
     <FPVCircuitContext.Provider value={{

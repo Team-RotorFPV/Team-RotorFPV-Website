@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cylinder, Text, Box } from '@react-three/drei';
+import { Cylinder, Text } from '@react-three/drei';
 
 export const AchievementPedestal = ({ position }) => {
   return (
